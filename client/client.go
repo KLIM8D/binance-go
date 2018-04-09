@@ -18,21 +18,27 @@ import (
 
 //API is a Binance API client.
 type API struct {
-	URL        string
-	Key        string
-	SecretKey  string
-	HTTPClient *http.Client
-	UserAgent  string
+	URL           string
+	Key           string
+	SecretKey     string
+	HTTPClient    *http.Client
+	UserAgent     string
+	AutoReconnect bool
 }
+
+const (
+	ReconnectLimit = 10
+)
 
 //New initializes API with given URL, api key and secret key. it also provides a way to overwrite *http.Client
 func New(url, key, secretKey string, httpClient *http.Client, userAgent string) *API {
 	return &API{
-		URL:        url,
-		Key:        key,
-		SecretKey:  secretKey,
-		HTTPClient: httpClient,
-		UserAgent:  userAgent,
+		URL:           url,
+		Key:           key,
+		SecretKey:     secretKey,
+		HTTPClient:    httpClient,
+		UserAgent:     userAgent,
+		AutoReconnect: true,
 	}
 }
 
@@ -130,20 +136,38 @@ func (a *API) SignedRequest(method, endpoint string, params interface{}, out int
 
 type StreamHandler func(data []byte)
 
-func (a *API) Stream(endpoint string, handler StreamHandler) {
+func (a *API) connect(endpoint string) *websocket.Conn {
 	url := fmt.Sprintf("wss://stream.binance.com:9443/ws/%s", endpoint)
-	websocketClient, _, err := websocket.DefaultDialer.Dial(url, nil)
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		log.Fatal("dial:", err)
-		return
+		return nil
 	}
+
+	return conn
+}
+
+func (a *API) Stream(endpoint string, handler StreamHandler) {
+	websocketClient := a.connect(endpoint)
 
 	go func() {
 		defer websocketClient.Close()
+		reconnects := 0
 		for {
 			_, m, err := websocketClient.ReadMessage()
 			if err != nil {
 				log.Println("read:", err)
+				if a.AutoReconnect && reconnects < ReconnectLimit {
+					err := websocketClient.Close()
+					if err != nil {
+						log.Println("close:", err)
+					}
+
+					reconnects++
+					websocketClient = a.connect(endpoint)
+					continue
+				}
+
 				return
 			}
 			go handler(m)
